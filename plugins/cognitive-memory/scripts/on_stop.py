@@ -288,9 +288,19 @@ def main():
                     content = "\n".join(text_parts)
 
                 if isinstance(content, str) and content.strip():
+                    clean = content.strip()
+                    # 跳過系統生成的訊息（XML 標籤、系統提示等）
+                    if clean.startswith("<") and any(tag in clean for tag in [
+                        "command-name>", "local-command", "system-reminder>",
+                        "bash-input>", "bash-stdout>", "command-message>",
+                    ]):
+                        continue
+                    # 跳過以 system-reminder 開頭的內嵌系統提示
+                    if "<system-reminder>" in clean:
+                        continue
                     messages.append({
                         "speaker": speaker,
-                        "content": content.strip(),
+                        "content": clean,
                     })
         except Exception as e:
             log(f"transcript_path read FAILED: {e}")
