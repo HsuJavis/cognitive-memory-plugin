@@ -18,7 +18,7 @@
 pip install mcp anthropic
 
 # 在 Claude Code 中（GitHub 安裝）
-/plugin install https://github.com/your-username/cognitive-memory-plugin
+/plugin install https://github.com/HsuJavis/cognitive-memory-plugin
 
 # 或本地安裝
 /plugin install /path/to/cognitive-memory-plugin
