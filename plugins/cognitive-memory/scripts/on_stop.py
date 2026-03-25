@@ -230,17 +230,19 @@ def main():
     except Exception:
         event = {}
 
-    # 防止無限迴圈
+    # 防止無限迴圈（Stop hook 特有的 flag）
     if event.get("stop_hook_active"):
         sys.exit(0)
+
+    hook_event = event.get("hook_event_name", "Stop")
 
     session_id = event.get("session_id", "default")
     cwd = _get_cwd_from_event(event)
     network = MemoryNetwork(project_dir=cwd)
     log = lambda msg: hook_log("Stop", msg, network._dir)
 
-    log(f"session={session_id}, cwd={cwd}")
-    log(f"event_keys={list(event.keys())}")
+    log(f"[{hook_event}] session={session_id}, cwd={cwd}")
+    log(f"[{hook_event}] event_keys={list(event.keys())}")
     log(f"storage={network._dir}")
 
     # ---- 1. 從 transcript 讀取對話訊息 ----
