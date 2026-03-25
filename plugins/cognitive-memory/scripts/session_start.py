@@ -28,9 +28,8 @@ def main():
         event_data = {}
 
     cwd = _get_cwd_from_event(event_data)
-    hook_log("SessionStart", f"cwd={cwd}, event_keys={list(event_data.keys())}")
     network = MemoryNetwork(project_dir=cwd)
-    hook_log("SessionStart", f"storage={network._dir}, count={network.count}")
+    hook_log("SessionStart", f"cwd={cwd}, storage={network._dir}, count={network.count}", network._dir)
 
     # ---- 1. 睡眠鞏固檢查 ----
     from datetime import datetime, timedelta

@@ -73,8 +73,8 @@ def main():
     # ---- 累積使用者訊息（供 Stop hook 自動提取用）----
     session_id = event_data.get("session_id", "default")
     cwd = _get_cwd_from_event(event_data)
-    hook_log("UserPrompt", f"session={session_id}, cwd={cwd}, content={content[:80]}")
     network = MemoryNetwork(project_dir=cwd)
+    hook_log("UserPrompt", f"session={session_id}, cwd={cwd}, content={content[:80]}", network._dir)
 
     transcript_file = network._dir / f"session_{session_id}_transcript.jsonl"
     try:
@@ -83,9 +83,9 @@ def main():
                 "content": content,
                 "ts": datetime.now().isoformat(),
             }, ensure_ascii=False) + "\n")
-        hook_log("UserPrompt", f"transcript saved to {transcript_file}")
+        hook_log("UserPrompt", f"transcript saved to {transcript_file}", network._dir)
     except Exception as e:
-        hook_log("UserPrompt", f"transcript write FAILED: {e}")
+        hook_log("UserPrompt", f"transcript write FAILED: {e}", network._dir)
     if network.count == 0:
         sys.exit(0)
 

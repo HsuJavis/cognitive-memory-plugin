@@ -34,7 +34,8 @@ def extract_memories_from_transcript(messages: list[str]) -> list[dict]:
     """
     從使用者訊息中用規則提取值得記住的資訊。
 
-    每條規則返回: {"content", "category", "importance", "tags", "emotional_valence"}
+    每條規則返回: {"content", "category", "importance", "tags", "emotional_valence", "source_text"}
+    source_text 記錄原始訊息，供 episodic 去重用。
     """
     extracted = []
     seen_contents = set()  # 去重
@@ -98,26 +99,37 @@ def extract_memories_from_transcript(messages: list[str]) -> list[dict]:
                     })
                 break
 
-        # ---- Rule 3: 角色/工作 ----
-        # "我是XXX" / "我的工作是XXX" / "我負責XXX"
+        # ---- Rule 3: 角色/工作/所有 ----
+        # "我是XXX" / "我在XXX上班" / "我有XXX"
         for pattern in [
             r"我是(?:一[個名位])?([^\s,，。]{2,20})",
             r"我(?:的工作|職業)是\s*([^\s,，。]{2,20})",
             r"我負責\s*([^\s,，。]{2,30})",
+            r"我在\s*([^,，。.!！?？\n]{2,30}?)(?:上班|工作|任職)",
+            r"我有(?:一[個家間])?([^,，。.!！?？\n]{2,30})",
         ]:
             m = re.search(pattern, text)
             if m:
                 role = m.group(1).strip()
                 # 過濾太短或常見語氣詞
-                if len(role) >= 2 and role not in {"想要", "覺得", "認為", "希望", "說"}:
-                    content = f"使用者的角色: {role}"
+                if len(role) >= 2 and role not in {"想要", "覺得", "認為", "希望", "說", "問題", "事情"}:
+                    # 根據匹配的 pattern 決定標籤
+                    if "上班" in text or "工作" in text or "任職" in text:
+                        content = f"使用者在 {role} 工作"
+                        tag_list = ["identity", "work"]
+                    elif "我有" in text:
+                        content = f"使用者擁有: {role}"
+                        tag_list = ["identity", "ownership"]
+                    else:
+                        content = f"使用者的角色: {role}"
+                        tag_list = ["identity", "role"]
                     if content not in seen_contents:
                         seen_contents.add(content)
                         extracted.append({
                             "content": content,
                             "category": "fact",
                             "importance": 0.8,
-                            "tags": ["identity", "role"],
+                            "tags": tag_list,
                             "emotional_valence": 0.0,
                             "emotional_intensity": 0.1,
                         })
@@ -126,7 +138,7 @@ def extract_memories_from_transcript(messages: list[str]) -> list[dict]:
         # ---- Rule 4: 偏好 ----
         # "我喜歡XXX" / "我偏好XXX" / "我習慣XXX"
         for pattern in [
-            r"我(?:喜歡|偏好|愛用|習慣用?)\s*([^\s,，。]{2,30})",
+            r"我(?:喜歡|偏好|愛用|愛吃|愛喝|愛|習慣用?)\s*([^\s,，。]{2,30})",
             r"I (?:prefer|like|love)\s+(.{2,30}?)(?:\.|,|$)",
         ]:
             m = re.search(pattern, text, re.I)
@@ -194,6 +206,16 @@ def extract_memories_from_transcript(messages: list[str]) -> list[dict]:
 
 
 # ============================================================================
+#  過濾用常量 — 太短或無意義的訊息不存為 episodic
+# ============================================================================
+
+SKIP_MESSAGES = {
+    "ok", "好", "嗯", "是", "對", "yes", "no", "不是", "了解",
+    "繼續", "可以", "好的", "謝謝", "thanks", "thank you",
+}
+
+
+# ============================================================================
 #  主流程
 # ============================================================================
 
@@ -203,23 +225,23 @@ def main():
     except Exception:
         event = {}
 
-    # 防止無限迴圈：Stop hook 返回 block 會讓 Claude 繼續，
-    # 再次 Stop 時 stop_hook_active=true，此時直接放行
+    # 防止無限迴圈
     if event.get("stop_hook_active"):
         sys.exit(0)
 
     session_id = event.get("session_id", "default")
     cwd = _get_cwd_from_event(event)
-    hook_log("Stop", f"session={session_id}, cwd={cwd}, stop_hook_active={event.get('stop_hook_active')}")
-    hook_log("Stop", f"event_keys={list(event.keys())}")
     network = MemoryNetwork(project_dir=cwd)
-    hook_log("Stop", f"storage={network._dir}")
+    log = lambda msg: hook_log("Stop", msg, network._dir)
 
-    # ---- 1. 規則式自動提取記憶 ----
+    log(f"session={session_id}, cwd={cwd}")
+    log(f"storage={network._dir}")
+
+    # ---- 1. 讀取 transcript ----
     transcript_file = network._dir / f"session_{session_id}_transcript.jsonl"
     auto_extracted_ids = []
 
-    hook_log("Stop", f"transcript_file={transcript_file}, exists={transcript_file.exists()}")
+    log(f"transcript exists={transcript_file.exists()}")
 
     if transcript_file.exists():
         try:
@@ -229,17 +251,19 @@ def main():
                     entry = json.loads(line)
                     messages.append(entry.get("content", ""))
 
-            hook_log("Stop", f"transcript has {len(messages)} messages")
-            memories = extract_memories_from_transcript(messages)
-            hook_log("Stop", f"extracted {len(memories)} memories from rules")
+            log(f"transcript has {len(messages)} messages")
 
-            for mem in memories:
-                # 檢查是否已有相似記憶（避免重複）
+            # ---- 1a. 規則式提取（身份、偏好等結構化資訊）----
+            rule_memories = extract_memories_from_transcript(messages)
+            log(f"rule extraction: {len(rule_memories)} matches")
+
+            rule_contents = set()
+            for mem in rule_memories:
+                rule_contents.add(mem["content"])
                 seeds = network.find_seeds(mem["content"])
                 if seeds:
-                    # 已有相關記憶，跳過
+                    log(f"  skip (duplicate): {mem['content'][:40]}")
                     continue
-
                 node = MemoryNode(
                     id="",
                     content=mem["content"],
@@ -248,33 +272,69 @@ def main():
                     emotional_valence=mem.get("emotional_valence", 0.0),
                     emotional_intensity=mem.get("emotional_intensity", 0.1),
                     tags=mem["tags"],
-                    source="auto-extract",  # 標記為自動提取
+                    source="auto-extract",
                 )
                 saved = network.add(node)
                 auto_extracted_ids.append(saved.id)
+                log(f"  saved: [{mem['category']}] {mem['content'][:50]}")
 
-                # 自動關聯
-                content_seeds = network.find_seeds(mem["content"])
-                for sid in content_seeds:
+                for sid in network.find_seeds(mem["content"]):
                     if sid != saved.id:
                         network.connect(saved.id, sid, weight=0.3)
 
-            if auto_extracted_ids:
-                msg = (
-                    f"🧠 自動提取: {len(auto_extracted_ids)} 條記憶 "
-                    f"({', '.join(m['category'] for m in memories[:3])})"
+            # ---- 1b. Episodic 記錄（規則未匹配的有意義訊息）----
+            # 收集所有已存記憶的內容，用於子字串去重（解決中文無空格分詞問題）
+            existing_contents = [n.content for n in network._nodes.values()]
+
+            for msg in messages:
+                msg_stripped = msg.strip()
+                # 跳過: 太短、常見語氣詞
+                if len(msg_stripped) < 5 or msg_stripped.lower() in SKIP_MESSAGES:
+                    continue
+
+                # 跳過: 訊息的關鍵片段已在已存記憶中（中文子字串匹配）
+                # 例如「我有一個冰淇淋店」→ 檢查「冰淇淋店」是否已在某條記憶中
+                is_covered = False
+                for ec in existing_contents:
+                    # 取訊息中 ≥3 字元的連續片段比對（中文 3 字即具語意）
+                    for i in range(len(msg_stripped) - 2):
+                        chunk = msg_stripped[i:i+3]
+                        if chunk in ec:
+                            is_covered = True
+                            break
+                    if is_covered:
+                        break
+                if is_covered:
+                    log(f"  episodic skip (covered): {msg_stripped[:40]}")
+                    continue
+
+                node = MemoryNode(
+                    id="",
+                    content=msg_stripped,
+                    category="episodic",
+                    importance=0.3,   # 低重要度，靠鞏固決定去留
+                    emotional_intensity=0.1,
+                    tags=["conversation"],
+                    source="auto-episodic",
                 )
+                saved = network.add(node)
+                auto_extracted_ids.append(saved.id)
+                log(f"  episodic saved: {msg_stripped[:50]}")
+
+                for sid in network.find_seeds(msg_stripped):
+                    if sid != saved.id:
+                        network.connect(saved.id, sid, weight=0.2)
+
+            if auto_extracted_ids:
+                msg = f"🧠 自動記錄: {len(auto_extracted_ids)} 條記憶"
                 print(msg, file=sys.stderr)
-                hook_log("Stop", msg)
-                for mem in memories:
-                    hook_log("Stop", f"  extracted: [{mem['category']}] {mem['content']}")
-            else:
-                hook_log("Stop", "no memories extracted from rules (no pattern matched)")
+                log(msg)
+
         except Exception as e:
             print(f"⚠️ 自動提取失敗: {e}", file=sys.stderr)
-            hook_log("Stop", f"extraction FAILED: {e}")
+            log(f"extraction FAILED: {e}")
 
-        # 清理 transcript 檔案
+        # 清理 transcript
         transcript_file.unlink(missing_ok=True)
 
     # ---- 2. 讀取 session 記憶列表 ----
@@ -286,21 +346,19 @@ def main():
         except Exception:
             pass
 
-    # 合併自動提取的 ID
     session_ids.extend(auto_extracted_ids)
 
     if session_ids:
         # ---- 3. 最終 Hebbian 加強 ----
-        # Session 結束 = 共同經歷完成，再加強一次連結
         for i, id_a in enumerate(session_ids):
             for id_b in session_ids[i + 1:]:
                 if id_a in network._nodes and id_b in network._nodes:
                     network.connect(id_a, id_b, weight=0.15)
 
-        # ---- 4. 記錄 session 日誌（供鞏固用）----
+        # ---- 4. 記錄 session 日誌 ----
         log_dir = network._dir / "session_logs"
         log_dir.mkdir(exist_ok=True)
-        log = {
+        session_log = {
             "session_id": session_id,
             "timestamp": datetime.now().isoformat(),
             "memory_ids": session_ids,
@@ -308,16 +366,15 @@ def main():
             "auto_extracted": len(auto_extracted_ids),
         }
         log_file = log_dir / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        log_file.write_text(json.dumps(log, ensure_ascii=False), encoding="utf-8")
+        log_file.write_text(json.dumps(session_log, ensure_ascii=False), encoding="utf-8")
 
         msg = (
             f"🧠 Session 結束: {len(session_ids)} 條記憶已加強連結"
-            + (f" (含 {len(auto_extracted_ids)} 條自動提取)" if auto_extracted_ids else "")
+            + (f" (含 {len(auto_extracted_ids)} 條自動記錄)" if auto_extracted_ids else "")
         )
         print(msg, file=sys.stderr)
-        hook_log("Stop", msg)
+        log(msg)
 
-        # 清理臨時 session 檔案
         session_file.unlink(missing_ok=True)
 
     network._save()

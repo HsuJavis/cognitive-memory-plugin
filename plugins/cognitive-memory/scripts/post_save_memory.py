@@ -43,8 +43,8 @@ def main():
         sys.exit(0)
 
     cwd = _get_cwd_from_event(event)
-    hook_log("PostToolUse", f"save_memory completed, new_id={new_id}, cwd={cwd}")
     network = MemoryNetwork(project_dir=cwd)
+    hook_log("PostToolUse", f"save_memory new_id={new_id}, storage={network._dir}", network._dir)
 
     # 讀寫 session 檔案使用 file lock，避免並發時丟失資料
     session_id = event.get("session_id", "default")

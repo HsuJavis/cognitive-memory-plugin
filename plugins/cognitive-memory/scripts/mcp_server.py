@@ -77,14 +77,16 @@ class MemoryNode:
 #  路徑工具
 # ============================================================================
 
-def hook_log(hook_name: str, message: str):
+def hook_log(hook_name: str, message: str, log_dir: Optional[Path] = None):
     """
     寫入 Hook 日誌，供除錯和追蹤整個對話流程。
-    日誌位於: ~/.cognitive-memory/hooks.log
+    日誌位於專案目錄下: ~/.cognitive-memory/{project}/hooks.log
+    若未指定 log_dir 則寫到基礎目錄。
     """
-    log_dir = Path(
-        os.environ.get("COGNITIVE_MEMORY_DIR", os.path.expanduser("~/.cognitive-memory"))
-    )
+    if log_dir is None:
+        log_dir = Path(
+            os.environ.get("COGNITIVE_MEMORY_DIR", os.path.expanduser("~/.cognitive-memory"))
+        )
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "hooks.log"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
