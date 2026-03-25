@@ -1,0 +1,18 @@
+{
+  "name": "cognitive-memory",
+  "version": "1.0.0",
+  "description": "認知記憶系統 — 模擬人類記憶的擴散激活、睡眠鞏固、雙歷程處理。為 Claude Code 提供跨 session 持久記憶，情境觸發提取，和週期性記憶整理。",
+  "author": {
+    "name": "HungJung Hsu"
+  },
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "cognitive",
+    "sleep-consolidation",
+    "spreading-activation",
+    "associative-memory"
+  ],
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json"
+}
