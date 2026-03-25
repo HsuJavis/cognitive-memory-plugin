@@ -30,18 +30,23 @@ from mcp_server import MemoryNetwork, MemoryNode, _get_cwd_from_event, hook_log
 #  規則式記憶提取 — 不呼叫 LLM，純 pattern matching
 # ============================================================================
 
-def extract_memories_from_transcript(messages: list[str]) -> list[dict]:
+def extract_memories_from_transcript(messages: list[dict]) -> list[dict]:
     """
-    從使用者訊息中用規則提取值得記住的資訊。
+    從對話訊息中用規則提取值得記住的資訊。
 
-    每條規則返回: {"content", "category", "importance", "tags", "emotional_valence", "source_text"}
-    source_text 記錄原始訊息，供 episodic 去重用。
+    輸入: list of {"speaker": "user"|"assistant", "content": "..."}
+    輸出: list of {"content", "category", "importance", "tags", "speaker", ...}
+
+    只對 user 訊息做規則提取（身份、偏好等是使用者自述的）。
     """
     extracted = []
     seen_contents = set()  # 去重
 
-    for text in messages:
-        text = text.strip()
+    for msg in messages:
+        # 規則提取只針對 user 訊息
+        if msg.get("speaker") != "user":
+            continue
+        text = msg.get("content", "").strip()
         if not text or len(text) < 3:
             continue
 
@@ -238,37 +243,55 @@ def main():
     log(f"event_keys={list(event.keys())}")
     log(f"storage={network._dir}")
 
-    # ---- 1. 從 transcript 讀取使用者訊息 ----
-    # 優先用 Claude Code 提供的 transcript_path（完整對話記錄）
-    # 退而求其次用 UserPromptSubmit 累積的 JSONL
-    messages = []
+    # ---- 1. 從 transcript 讀取對話訊息 ----
+    # 每條訊息帶 speaker 標記: {"speaker": "user"|"assistant", "content": "..."}
+    # 記憶也應該記錄是誰說的
+    messages = []  # list of {"speaker": str, "content": str}
     transcript_path = event.get("transcript_path", "")
     transcript_jsonl = network._dir / f"session_{session_id}_transcript.jsonl"
 
     if transcript_path and Path(transcript_path).exists():
         log(f"reading transcript_path={transcript_path}")
         try:
-            transcript_text = Path(transcript_path).read_text(encoding="utf-8")
-            # transcript 是純文字格式，提取 user 角色的訊息
-            # 格式可能是 JSON array 或換行分隔的文字
-            try:
-                data = json.loads(transcript_text)
-                if isinstance(data, list):
-                    for entry in data:
-                        if isinstance(entry, dict) and entry.get("role") == "user":
-                            content = entry.get("content", "")
-                            if isinstance(content, str) and content.strip():
-                                messages.append(content.strip())
-                            elif isinstance(content, list):
-                                for part in content:
-                                    if isinstance(part, dict) and part.get("type") == "text":
-                                        messages.append(part.get("text", "").strip())
-            except json.JSONDecodeError:
-                # 純文字格式，按行讀取
-                for line in transcript_text.split("\n"):
-                    line = line.strip()
-                    if line and len(line) > 3:
-                        messages.append(line)
+            # Claude Code transcript 是 JSONL 格式
+            # 每行一個 JSON，type="user"|"assistant"，message 在 message 欄位
+            for line in Path(transcript_path).open(encoding="utf-8"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                entry_type = entry.get("type", "")
+                if entry_type not in ("user", "assistant"):
+                    continue
+
+                # 跳過 meta 訊息（如 /plugin, /exit 等系統指令）
+                if entry.get("isMeta"):
+                    continue
+
+                msg = entry.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+
+                speaker = "user" if entry_type == "user" else "assistant"
+                content = msg.get("content", "")
+
+                # content 可能是 string 或 list of parts
+                if isinstance(content, list):
+                    text_parts = []
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            text_parts.append(part.get("text", ""))
+                    content = "\n".join(text_parts)
+
+                if isinstance(content, str) and content.strip():
+                    messages.append({
+                        "speaker": speaker,
+                        "content": content.strip(),
+                    })
         except Exception as e:
             log(f"transcript_path read FAILED: {e}")
 
@@ -278,7 +301,10 @@ def main():
             for line in transcript_jsonl.read_text(encoding="utf-8").strip().split("\n"):
                 if line.strip():
                     entry = json.loads(line)
-                    messages.append(entry.get("content", ""))
+                    messages.append({
+                        "speaker": "user",
+                        "content": entry.get("content", ""),
+                    })
         except Exception as e:
             log(f"transcript_jsonl read FAILED: {e}")
     else:
@@ -320,41 +346,51 @@ def main():
                     if sid != saved.id:
                         network.connect(saved.id, sid, weight=0.3)
 
-            # ---- 1b. Episodic 記錄（規則未匹配的有意義訊息）----
+            # ---- 1b. Episodic 記錄（user 和 assistant 都記錄，帶 speaker 標記）----
             existing_contents = [n.content for n in network._nodes.values()]
 
             for msg in messages:
-                msg_stripped = msg.strip()
-                if len(msg_stripped) < 5 or msg_stripped.lower() in SKIP_MESSAGES:
+                speaker = msg.get("speaker", "user")
+                msg_text = msg.get("content", "").strip()
+
+                # 跳過太短、常見語氣詞
+                if len(msg_text) < 5 or msg_text.lower() in SKIP_MESSAGES:
                     continue
 
+                # assistant 訊息通常很長，只取前 200 字作為摘要
+                if speaker == "assistant":
+                    if len(msg_text) > 200:
+                        msg_text = msg_text[:200] + "..."
+
+                # 3 字元子字串去重
                 is_covered = False
                 for ec in existing_contents:
-                    for i in range(len(msg_stripped) - 2):
-                        chunk = msg_stripped[i:i+3]
+                    for i in range(min(len(msg_text), 100) - 2):  # 只檢查前 100 字
+                        chunk = msg_text[i:i+3]
                         if chunk in ec:
                             is_covered = True
                             break
                     if is_covered:
                         break
                 if is_covered:
-                    log(f"  episodic skip (covered): {msg_stripped[:40]}")
                     continue
 
+                # 標記 speaker 到 content 和 tags
+                tagged_content = f"[{speaker}] {msg_text}"
                 node = MemoryNode(
                     id="",
-                    content=msg_stripped,
+                    content=tagged_content,
                     category="episodic",
-                    importance=0.3,
+                    importance=0.35 if speaker == "user" else 0.2,
                     emotional_intensity=0.1,
-                    tags=["conversation"],
+                    tags=["conversation", speaker],
                     source="auto-episodic",
                 )
                 saved = network.add(node)
                 auto_extracted_ids.append(saved.id)
-                log(f"  episodic saved: {msg_stripped[:50]}")
+                log(f"  episodic [{speaker}]: {msg_text[:50]}")
 
-                for sid in network.find_seeds(msg_stripped):
+                for sid in network.find_seeds(msg_text):
                     if sid != saved.id:
                         network.connect(saved.id, sid, weight=0.2)
 
