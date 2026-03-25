@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "cognitive-memory-plugin",
+  "description": "認知記憶系統插件市集 — 模擬人類記憶的擴散激活、睡眠鞏固、雙歷程處理",
+  "owner": {
+    "name": "HungJung Hsu"
+  },
+  "plugins": [
+    {
+      "name": "cognitive-memory",
+      "description": "認知記憶系統 — 模擬人類記憶的擴散激活、睡眠鞏固、雙歷程處理。為 Claude Code 提供跨 session 持久記憶，情境觸發提取，和週期性記憶整理。",
+      "source": "./plugins/cognitive-memory",
+      "category": "productivity"
+    }
+  ]
+}
