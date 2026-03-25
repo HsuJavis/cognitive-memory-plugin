@@ -235,21 +235,59 @@ def main():
     log = lambda msg: hook_log("Stop", msg, network._dir)
 
     log(f"session={session_id}, cwd={cwd}")
+    log(f"event_keys={list(event.keys())}")
     log(f"storage={network._dir}")
 
-    # ---- 1. 讀取 transcript ----
-    transcript_file = network._dir / f"session_{session_id}_transcript.jsonl"
-    auto_extracted_ids = []
+    # ---- 1. 從 transcript 讀取使用者訊息 ----
+    # 優先用 Claude Code 提供的 transcript_path（完整對話記錄）
+    # 退而求其次用 UserPromptSubmit 累積的 JSONL
+    messages = []
+    transcript_path = event.get("transcript_path", "")
+    transcript_jsonl = network._dir / f"session_{session_id}_transcript.jsonl"
 
-    log(f"transcript exists={transcript_file.exists()}")
-
-    if transcript_file.exists():
+    if transcript_path and Path(transcript_path).exists():
+        log(f"reading transcript_path={transcript_path}")
         try:
-            messages = []
-            for line in transcript_file.read_text(encoding="utf-8").strip().split("\n"):
+            transcript_text = Path(transcript_path).read_text(encoding="utf-8")
+            # transcript 是純文字格式，提取 user 角色的訊息
+            # 格式可能是 JSON array 或換行分隔的文字
+            try:
+                data = json.loads(transcript_text)
+                if isinstance(data, list):
+                    for entry in data:
+                        if isinstance(entry, dict) and entry.get("role") == "user":
+                            content = entry.get("content", "")
+                            if isinstance(content, str) and content.strip():
+                                messages.append(content.strip())
+                            elif isinstance(content, list):
+                                for part in content:
+                                    if isinstance(part, dict) and part.get("type") == "text":
+                                        messages.append(part.get("text", "").strip())
+            except json.JSONDecodeError:
+                # 純文字格式，按行讀取
+                for line in transcript_text.split("\n"):
+                    line = line.strip()
+                    if line and len(line) > 3:
+                        messages.append(line)
+        except Exception as e:
+            log(f"transcript_path read FAILED: {e}")
+
+    elif transcript_jsonl.exists():
+        log(f"reading transcript_jsonl={transcript_jsonl}")
+        try:
+            for line in transcript_jsonl.read_text(encoding="utf-8").strip().split("\n"):
                 if line.strip():
                     entry = json.loads(line)
                     messages.append(entry.get("content", ""))
+        except Exception as e:
+            log(f"transcript_jsonl read FAILED: {e}")
+    else:
+        log("no transcript source available")
+
+    auto_extracted_ids = []
+    log(f"messages found: {len(messages)}")
+
+    if messages:
 
             log(f"transcript has {len(messages)} messages")
 
@@ -334,8 +372,8 @@ def main():
             print(f"⚠️ 自動提取失敗: {e}", file=sys.stderr)
             log(f"extraction FAILED: {e}")
 
-        # 清理 transcript
-        transcript_file.unlink(missing_ok=True)
+        # 清理 UserPromptSubmit 累積的 transcript（如果有）
+        transcript_jsonl.unlink(missing_ok=True)
 
     # ---- 2. 讀取 session 記憶列表 ----
     session_file = network._dir / f"session_{session_id}.json"
