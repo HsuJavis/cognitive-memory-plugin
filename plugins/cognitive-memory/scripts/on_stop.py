@@ -245,19 +245,32 @@ def main():
     log(f"[{hook_event}] event_keys={list(event.keys())}")
     log(f"storage={network._dir}")
 
-    # ---- 1. 從 transcript 讀取對話訊息 ----
-    # 每條訊息帶 speaker 標記: {"speaker": "user"|"assistant", "content": "..."}
-    # 記憶也應該記錄是誰說的
+    # ---- 1. 從 transcript 讀取對話訊息（增量讀取）----
+    # 用 offset 檔案追蹤上次讀到第幾行，避免重複提取
     messages = []  # list of {"speaker": str, "content": str}
     transcript_path = event.get("transcript_path", "")
     transcript_jsonl = network._dir / f"session_{session_id}_transcript.jsonl"
+    offset_file = network._dir / f"session_{session_id}_offset.json"
+
+    # 讀取上次的 offset（行號）
+    last_offset = 0
+    if offset_file.exists():
+        try:
+            last_offset = json.loads(offset_file.read_text()).get("line", 0)
+        except Exception:
+            last_offset = 0
+
+    current_line = 0
 
     if transcript_path and Path(transcript_path).exists():
-        log(f"reading transcript_path={transcript_path}")
+        log(f"reading transcript_path={transcript_path}, offset={last_offset}")
         try:
-            # Claude Code transcript 是 JSONL 格式
-            # 每行一個 JSON，type="user"|"assistant"，message 在 message 欄位
             for line in Path(transcript_path).open(encoding="utf-8"):
+                current_line += 1
+                # 跳過已處理的行
+                if current_line <= last_offset:
+                    continue
+
                 line = line.strip()
                 if not line:
                     continue
@@ -418,6 +431,17 @@ def main():
         # 清理 UserPromptSubmit 累積的 transcript（如果有）
         transcript_jsonl.unlink(missing_ok=True)
 
+    # 保存 offset — 下次 Stop/PreCompact 從這裡繼續
+    if current_line > last_offset:
+        try:
+            offset_file.write_text(
+                json.dumps({"line": current_line, "ts": datetime.now().isoformat()}),
+                encoding="utf-8",
+            )
+            log(f"offset saved: {last_offset} → {current_line}")
+        except Exception:
+            pass
+
     # ---- 2. 讀取 session 記憶列表 ----
     session_file = network._dir / f"session_{session_id}.json"
     session_ids = []
@@ -457,6 +481,11 @@ def main():
         log(msg)
 
         session_file.unlink(missing_ok=True)
+
+    # Stop event 清理 offset（session 結束了，下次是新 session）
+    # PreCompact 不清理（同 session 會繼續）
+    if hook_event == "Stop":
+        offset_file.unlink(missing_ok=True)
 
     network._save()
     sys.exit(0)
