@@ -77,6 +77,24 @@ class MemoryNode:
 #  路徑工具
 # ============================================================================
 
+def hook_log(hook_name: str, message: str):
+    """
+    寫入 Hook 日誌，供除錯和追蹤整個對話流程。
+    日誌位於: ~/.cognitive-memory/hooks.log
+    """
+    log_dir = Path(
+        os.environ.get("COGNITIVE_MEMORY_DIR", os.path.expanduser("~/.cognitive-memory"))
+    )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "hooks.log"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"{timestamp} [{hook_name}] {message}\n")
+    except Exception:
+        pass
+
+
 def _path_to_subdir(path: str) -> str:
     """
     將工作目錄路徑轉換為安全的子目錄名稱。
@@ -496,12 +514,13 @@ def _try_llm_summarize(contents: list[str], topic: str) -> Optional[str]:
 #  MCP Server — 使用 mcp 套件的 stdio 傳輸
 # ============================================================================
 
-def create_server():
+def create_server(project_dir: Optional[str] = None):
     """建立 MCP Server 並註冊所有工具"""
     from mcp.server.fastmcp import FastMCP
 
-    # 初始化記憶網路
-    network = MemoryNetwork()
+    # 初始化記憶網路（依專案隔離）
+    network = MemoryNetwork(project_dir=project_dir)
+    hook_log("MCP", f"Server started, storage={network._dir}")
 
     # 建立 MCP Server
     mcp = FastMCP(
@@ -863,5 +882,12 @@ def create_server():
 # ============================================================================
 
 if __name__ == "__main__":
-    server = create_server()
+    # 從 args 讀取專案目錄（由 .mcp.json 傳入 ${CLAUDE_PROJECT_DIR}）
+    _project_dir = None
+    if len(sys.argv) > 1:
+        _arg = sys.argv[1]
+        # 確保不是未展開的模板變數
+        if _arg and not _arg.startswith("${"):
+            _project_dir = _arg
+    server = create_server(project_dir=_project_dir)
     server.run(transport="stdio")

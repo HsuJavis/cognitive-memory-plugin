@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcp_server import MemoryNetwork, MemoryNode, _get_cwd_from_event
+from mcp_server import MemoryNetwork, MemoryNode, _get_cwd_from_event, hook_log
 
 
 # ============================================================================
@@ -210,11 +210,16 @@ def main():
 
     session_id = event.get("session_id", "default")
     cwd = _get_cwd_from_event(event)
+    hook_log("Stop", f"session={session_id}, cwd={cwd}, stop_hook_active={event.get('stop_hook_active')}")
+    hook_log("Stop", f"event_keys={list(event.keys())}")
     network = MemoryNetwork(project_dir=cwd)
+    hook_log("Stop", f"storage={network._dir}")
 
     # ---- 1. 規則式自動提取記憶 ----
     transcript_file = network._dir / f"session_{session_id}_transcript.jsonl"
     auto_extracted_ids = []
+
+    hook_log("Stop", f"transcript_file={transcript_file}, exists={transcript_file.exists()}")
 
     if transcript_file.exists():
         try:
@@ -224,7 +229,9 @@ def main():
                     entry = json.loads(line)
                     messages.append(entry.get("content", ""))
 
+            hook_log("Stop", f"transcript has {len(messages)} messages")
             memories = extract_memories_from_transcript(messages)
+            hook_log("Stop", f"extracted {len(memories)} memories from rules")
 
             for mem in memories:
                 # 檢查是否已有相似記憶（避免重複）
@@ -253,13 +260,19 @@ def main():
                         network.connect(saved.id, sid, weight=0.3)
 
             if auto_extracted_ids:
-                print(
+                msg = (
                     f"🧠 自動提取: {len(auto_extracted_ids)} 條記憶 "
-                    f"({', '.join(m['category'] for m in memories[:3])})",
-                    file=sys.stderr,
+                    f"({', '.join(m['category'] for m in memories[:3])})"
                 )
+                print(msg, file=sys.stderr)
+                hook_log("Stop", msg)
+                for mem in memories:
+                    hook_log("Stop", f"  extracted: [{mem['category']}] {mem['content']}")
+            else:
+                hook_log("Stop", "no memories extracted from rules (no pattern matched)")
         except Exception as e:
             print(f"⚠️ 自動提取失敗: {e}", file=sys.stderr)
+            hook_log("Stop", f"extraction FAILED: {e}")
 
         # 清理 transcript 檔案
         transcript_file.unlink(missing_ok=True)
@@ -297,11 +310,12 @@ def main():
         log_file = log_dir / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         log_file.write_text(json.dumps(log, ensure_ascii=False), encoding="utf-8")
 
-        print(
+        msg = (
             f"🧠 Session 結束: {len(session_ids)} 條記憶已加強連結"
-            + (f" (含 {len(auto_extracted_ids)} 條自動提取)" if auto_extracted_ids else ""),
-            file=sys.stderr,
+            + (f" (含 {len(auto_extracted_ids)} 條自動提取)" if auto_extracted_ids else "")
         )
+        print(msg, file=sys.stderr)
+        hook_log("Stop", msg)
 
         # 清理臨時 session 檔案
         session_file.unlink(missing_ok=True)

@@ -20,7 +20,7 @@ import fcntl
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcp_server import MemoryNetwork, _get_cwd_from_event
+from mcp_server import MemoryNetwork, _get_cwd_from_event, hook_log
 
 def main():
     try:
@@ -43,6 +43,7 @@ def main():
         sys.exit(0)
 
     cwd = _get_cwd_from_event(event)
+    hook_log("PostToolUse", f"save_memory completed, new_id={new_id}, cwd={cwd}")
     network = MemoryNetwork(project_dir=cwd)
 
     # 讀寫 session 檔案使用 file lock，避免並發時丟失資料

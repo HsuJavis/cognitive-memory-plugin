@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcp_server import MemoryNetwork, _get_cwd_from_event
+from mcp_server import MemoryNetwork, _get_cwd_from_event, hook_log
 
 def emotional_scan(text: str) -> dict:
     """
@@ -73,6 +73,7 @@ def main():
     # ---- 累積使用者訊息（供 Stop hook 自動提取用）----
     session_id = event_data.get("session_id", "default")
     cwd = _get_cwd_from_event(event_data)
+    hook_log("UserPrompt", f"session={session_id}, cwd={cwd}, content={content[:80]}")
     network = MemoryNetwork(project_dir=cwd)
 
     transcript_file = network._dir / f"session_{session_id}_transcript.jsonl"
@@ -82,8 +83,9 @@ def main():
                 "content": content,
                 "ts": datetime.now().isoformat(),
             }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+        hook_log("UserPrompt", f"transcript saved to {transcript_file}")
+    except Exception as e:
+        hook_log("UserPrompt", f"transcript write FAILED: {e}")
     if network.count == 0:
         sys.exit(0)
 

@@ -18,7 +18,7 @@ import os
 
 # 載入同目錄下的 mcp_server.py 中的 MemoryNetwork
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcp_server import MemoryNetwork, _get_cwd_from_event
+from mcp_server import MemoryNetwork, _get_cwd_from_event, hook_log
 
 def main():
     # 讀取 stdin（Claude Code 傳入的 session 資訊）
@@ -28,7 +28,9 @@ def main():
         event_data = {}
 
     cwd = _get_cwd_from_event(event_data)
+    hook_log("SessionStart", f"cwd={cwd}, event_keys={list(event_data.keys())}")
     network = MemoryNetwork(project_dir=cwd)
+    hook_log("SessionStart", f"storage={network._dir}, count={network.count}")
 
     # ---- 1. 睡眠鞏固檢查 ----
     from datetime import datetime, timedelta
