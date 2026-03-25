@@ -16,10 +16,11 @@ Hebbian Learning — 記憶儲存後自動加強關聯
 import sys
 import json
 import os
+import fcntl
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcp_server import MemoryNetwork
+from mcp_server import MemoryNetwork, _get_cwd_from_event
 
 def main():
     try:
@@ -41,31 +42,47 @@ def main():
     if not new_id:
         sys.exit(0)
 
-    network = MemoryNetwork()
+    cwd = _get_cwd_from_event(event)
+    network = MemoryNetwork(project_dir=cwd)
 
-    # 讀取本次 session 的記憶 ID 列表
+    # 讀寫 session 檔案使用 file lock，避免並發時丟失資料
     session_id = event.get("session_id", "default")
     session_file = network._dir / f"session_{session_id}.json"
 
-    session_ids = []
-    if session_file.exists():
-        try:
-            session_ids = json.loads(session_file.read_text())
-        except Exception:
+    # 使用 lock 檔案保護讀-改-寫操作
+    lock_file = network._dir / f"session_{session_id}.lock"
+
+    try:
+        with open(lock_file, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)  # 排他鎖
+
+            # 讀取當前 session 記憶列表
             session_ids = []
+            if session_file.exists():
+                try:
+                    session_ids = json.loads(session_file.read_text())
+                except Exception:
+                    session_ids = []
 
-    # Hebbian: 新記憶和本次 session 的所有已有記憶建立連結
-    for existing_id in session_ids:
-        if existing_id != new_id and existing_id in network._nodes:
-            network.connect(new_id, existing_id, weight=0.3)
-            print(
-                f"🧠 Hebb: 連結 {new_id[:8]} ↔ {existing_id[:8]}",
-                file=sys.stderr,
-            )
+            # Hebbian: 新記憶和本次 session 的所有已有記憶建立連結
+            for existing_id in session_ids:
+                if existing_id != new_id and existing_id in network._nodes:
+                    network.connect(new_id, existing_id, weight=0.3)
+                    print(
+                        f"🧠 Hebb: 連結 {new_id[:8]} ↔ {existing_id[:8]}",
+                        file=sys.stderr,
+                    )
 
-    # 記錄新 ID 到 session 列表
-    session_ids.append(new_id)
-    session_file.write_text(json.dumps(session_ids), encoding="utf-8")
+            # 記錄新 ID
+            session_ids.append(new_id)
+            session_file.write_text(json.dumps(session_ids), encoding="utf-8")
+
+            fcntl.flock(lf, fcntl.LOCK_UN)  # 釋放鎖
+    except Exception as e:
+        print(f"⚠️ Hebbian hook 錯誤: {e}", file=sys.stderr)
+
+    # 清理 lock 檔案（非必要，但保持乾淨）
+    lock_file.unlink(missing_ok=True)
 
     sys.exit(0)
 

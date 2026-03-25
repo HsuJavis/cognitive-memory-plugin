@@ -18,7 +18,7 @@ import os
 
 # 載入同目錄下的 mcp_server.py 中的 MemoryNetwork
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcp_server import MemoryNetwork
+from mcp_server import MemoryNetwork, _get_cwd_from_event
 
 def main():
     # 讀取 stdin（Claude Code 傳入的 session 資訊）
@@ -27,7 +27,8 @@ def main():
     except Exception:
         event_data = {}
 
-    network = MemoryNetwork()
+    cwd = _get_cwd_from_event(event_data)
+    network = MemoryNetwork(project_dir=cwd)
 
     # ---- 1. 睡眠鞏固檢查 ----
     from datetime import datetime, timedelta

@@ -74,6 +74,27 @@ class MemoryNode:
 
 
 # ============================================================================
+#  路徑工具
+# ============================================================================
+
+def _path_to_subdir(path: str) -> str:
+    """
+    將工作目錄路徑轉換為安全的子目錄名稱。
+    /Users/javis/Documents/javis → -Users-javis-Documents-javis
+    """
+    return path.replace("/", "-").replace("\\", "-").lstrip("-")
+
+
+def _get_cwd_from_event(event: dict) -> str:
+    """從 Hook event 中提取工作目錄"""
+    return (
+        event.get("cwd")
+        or event.get("workspace", {}).get("current_dir", "")
+        or os.getcwd()
+    )
+
+
+# ============================================================================
 #  關聯式記憶網路 — Associative Memory Network
 # ============================================================================
 
@@ -81,16 +102,23 @@ class MemoryNetwork:
     """
     關聯式記憶網路 — 支援擴散激活的持久記憶儲存
 
-    儲存位置: ~/.cognitive-memory/memory_network.json
-    （可透過 COGNITIVE_MEMORY_DIR 環境變數修改）
+    依專案目錄隔離：每個工作目錄有獨立的記憶空間。
+    儲存位置: ~/.cognitive-memory/{project-subdir}/memory_network.json
     """
 
-    def __init__(self, storage_dir: Optional[str] = None):
-        self._dir = Path(
-            storage_dir
-            or os.environ.get("COGNITIVE_MEMORY_DIR")
-            or os.path.expanduser("~/.cognitive-memory")
-        )
+    def __init__(self, storage_dir: Optional[str] = None, project_dir: Optional[str] = None):
+        if storage_dir:
+            # 直接指定完整路徑（測試或明確指定時），不加專案子目錄
+            self._dir = Path(storage_dir)
+        else:
+            base = Path(
+                os.environ.get("COGNITIVE_MEMORY_DIR")
+                or os.path.expanduser("~/.cognitive-memory")
+            )
+            # 專案隔離: 從 project_dir 或 cwd 推導子目錄
+            proj = project_dir or os.getcwd()
+            self._dir = base / _path_to_subdir(proj)
+
         self._dir.mkdir(parents=True, exist_ok=True)
         self._file = self._dir / "memory_network.json"
         self._meta_file = self._dir / "last_sleep.json"
@@ -265,7 +293,16 @@ class MemoryNetwork:
                     pruned += 1
             node.connections = new_conns
             if node.importance < 0.85:
-                node.importance *= 0.95
+                # 情緒越強，衰減越慢（0.95 ~ 0.99）
+                base_decay = 0.95 + node.emotional_intensity * 0.04
+                # 時間衰減: 越舊的記憶衰減越快（每年最多額外 10%）
+                try:
+                    days_old = (datetime.now() - datetime.fromisoformat(node.created_at)).days
+                    age_penalty = min(0.10, days_old / 365 * 0.10)
+                except Exception:
+                    age_penalty = 0.0
+                decay_rate = max(0.80, base_decay - age_penalty)
+                node.importance *= decay_rate
         report["stages"]["2_prune"] = f"修剪 {pruned // 2} 條弱連結"
 
         # ---- Stage 3: 模式提取 ----
@@ -294,16 +331,23 @@ class MemoryNetwork:
                 clusters.append(cluster)
 
         extracted = 0
+        pending_clusters = []  # 用 fallback 的 cluster，供 Claude 精煉
+
         for cluster in clusters[:5]:
             all_tags = [t for n in cluster for t in n.tags]
             common = [t for t in set(all_tags) if all_tags.count(t) >= 2] or ["general"]
 
+            contents = [f"- {n.content}" for n in cluster]
+            used_fallback = False
+            summary = None
             if llm_summarize_fn:
-                contents = [f"- {n.content}" for n in cluster]
                 summary = llm_summarize_fn(contents, common[0])
             else:
+                summary = _try_llm_summarize(contents, common[0])
+            if not summary:
                 snippets = [n.content[:30] for n in cluster[:4]]
                 summary = f"關於「{common[0]}」的歸納: {'; '.join(snippets)}"
+                used_fallback = True
 
             sem = MemoryNode(
                 id="", content=summary, category="semantic",
@@ -319,7 +363,18 @@ class MemoryNetwork:
                 if "consolidated" not in node.tags:
                     node.tags.append("consolidated")
             extracted += 1
+
+            if used_fallback:
+                pending_clusters.append({
+                    "semantic_id": saved.id,
+                    "topic": common[0],
+                    "contents": [n.content for n in cluster],
+                    "current_summary": summary,
+                })
+
         report["stages"]["3_extract"] = f"提取 {extracted} 個模式"
+        if pending_clusters:
+            report["pending_refinement"] = pending_clusters
 
         # ---- Stage 4: 整合 ----
         semantics = [n for n in self._nodes.values() if n.category == "semantic"]
@@ -368,6 +423,72 @@ class MemoryNetwork:
 
 
 # ============================================================================
+#  LLM 摘要 — 用於睡眠鞏固 Stage 3 的語意歸納
+# ============================================================================
+
+def _find_api_key() -> Optional[str]:
+    """
+    從多個來源自動搜尋 Anthropic API key，使用者不需手動設定。
+
+    搜尋順序:
+    1. ANTHROPIC_API_KEY 環境變數（標準）
+    2. ~/.anthropic/api_key 檔案
+    3. ~/.config/anthropic/api_key 檔案
+    """
+    # 1. 環境變數
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        return key
+
+    # 2. 常見檔案位置
+    for path in [
+        Path.home() / ".anthropic" / "api_key",
+        Path.home() / ".config" / "anthropic" / "api_key",
+    ]:
+        try:
+            if path.exists():
+                key = path.read_text(encoding="utf-8").strip()
+                if key and key.startswith("sk-"):
+                    return key
+        except Exception:
+            pass
+
+    return None
+
+
+def _try_llm_summarize(contents: list[str], topic: str) -> Optional[str]:
+    """
+    嘗試用 Anthropic API 將多條 episodic 記憶歸納為一條 semantic 記憶。
+    自動搜尋 API key，找不到或呼叫失敗則返回 None。
+    """
+    api_key = _find_api_key()
+    if not api_key:
+        logger.info("未找到 API key，Stage 3 將使用 fallback 摘要")
+        return None
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"將以下關於「{topic}」的多條記憶歸納為一句繁體中文摘要，"
+                    f"只輸出摘要本身，不要前綴或解釋：\n"
+                    + "\n".join(contents)
+                ),
+            }],
+        )
+        text = response.content[0].text.strip()
+        return text if text else None
+    except Exception as e:
+        logger.warning(f"LLM 摘要失敗，使用 fallback: {e}")
+        return None
+
+
+# ============================================================================
 #  MCP Server — 使用 mcp 套件的 stdio 傳輸
 # ============================================================================
 
@@ -395,6 +516,7 @@ def create_server():
         importance: float = 0.5,
         tags: list[str] = [],
         emotional_valence: float = 0.0,
+        emotional_intensity: float = -1.0,
     ) -> str:
         """
         儲存一條記憶到認知記憶網路。
@@ -408,17 +530,52 @@ def create_server():
             importance: 重要度 0.0~1.0
             tags: 標籤列表，用於關聯和檢索
             emotional_valence: 情緒效價 -1.0(負面)~+1.0(正面)
+            emotional_intensity: 情緒強度 0.0(平淡)~1.0(強烈)，-1表示自動從valence推算
         """
+        # 情緒強度: 若未明確指定（-1），則從 valence 推算
+        # 但 valence=0 + intensity=高 是合理的（如：中立但緊急的事件）
+        actual_intensity = emotional_intensity if emotional_intensity >= 0 else abs(emotional_valence)
+
         node = MemoryNode(
             id="",
             content=content,
             category=category,
             importance=importance,
             emotional_valence=emotional_valence,
-            emotional_intensity=abs(emotional_valence),
+            emotional_intensity=actual_intensity,
             tags=tags,
             source="tool",
         )
+        # ---- 衝突偵測: 檢查是否有矛盾的記憶 ----
+        conflicts = []
+        content_lower = content.lower()
+        # 正反面指標詞
+        positive_markers = {"喜歡", "偏好", "愛用", "prefer", "like", "love", "習慣"}
+        negative_markers = {"不喜歡", "討厭", "不要", "別", "hate", "dislike", "don't", "avoid"}
+        new_is_negative = any(m in content_lower for m in negative_markers)
+        new_is_positive = any(m in content_lower for m in positive_markers)
+
+        if new_is_negative or new_is_positive:
+            for existing in network._nodes.values():
+                if existing.category not in ("preference", "fact"):
+                    continue
+                ex_lower = existing.content.lower()
+                # 找共同主題詞（至少 2 字匹配）
+                new_words = {w for w in content_lower.split() if len(w) > 1}
+                ex_words = {w for w in ex_lower.split() if len(w) > 1}
+                overlap = new_words & ex_words
+                if not overlap:
+                    continue
+                # 偵測方向衝突
+                ex_negative = any(m in ex_lower for m in negative_markers)
+                ex_positive = any(m in ex_lower for m in positive_markers)
+                if (new_is_positive and ex_negative) or (new_is_negative and ex_positive):
+                    conflicts.append({
+                        "id": existing.id,
+                        "content": existing.content[:60],
+                        "overlap": list(overlap)[:3],
+                    })
+
         saved = network.add(node)
 
         # 自動關聯: 找到相關記憶並建立連結
@@ -429,14 +586,23 @@ def create_server():
                 network.connect(saved.id, sid, weight=0.4)
                 linked += 1
 
-        return json.dumps({
+        result = {
             "status": "saved",
             "id": saved.id,
             "importance": saved.importance,
             "connections": linked,
             "total_memories": network.count,
             "note": "下次對話會自動記得" if importance >= 0.7 else "",
-        }, ensure_ascii=False)
+        }
+
+        if conflicts:
+            result["conflicts"] = conflicts
+            result["conflict_hint"] = (
+                "偵測到可能矛盾的記憶，請確認是否需要用 "
+                "forget_memory 刪除舊的，或用 update_memory 修改。"
+            )
+
+        return json.dumps(result, ensure_ascii=False)
 
     # ================================================================
     #  Tool 2: recall_memory — 擴散激活搜尋
@@ -508,7 +674,79 @@ def create_server():
         }, ensure_ascii=False)
 
     # ================================================================
-    #  Tool 4: list_memories — 記憶庫概覽
+    #  Tool 4: update_memory — 修改記憶
+    # ================================================================
+
+    @mcp.tool()
+    def update_memory(
+        memory_id: str,
+        content: str = "",
+        importance: float = -1.0,
+        emotional_valence: float = -99.0,
+        emotional_intensity: float = -1.0,
+        category: str = "",
+        tags: list[str] = [],
+    ) -> str:
+        """
+        修改一條已存在的記憶的屬性。只有提供的欄位會被更新。
+
+        Args:
+            memory_id: 要修改的記憶 ID
+            content: 新內容（空字串=不修改）
+            importance: 新重要度 0.0~1.0（-1=不修改）
+            emotional_valence: 新情緒效價 -1.0~+1.0（-99=不修改）
+            emotional_intensity: 新情緒強度 0.0~1.0（-1=不修改）
+            category: 新分類（空字串=不修改）
+            tags: 新標籤列表（空列表=不修改）
+        """
+        if memory_id not in network._nodes:
+            return json.dumps({
+                "status": "not_found",
+                "memory_id": memory_id,
+            }, ensure_ascii=False)
+
+        node = network._nodes[memory_id]
+        updated_fields = []
+
+        if content:
+            node.content = content
+            updated_fields.append("content")
+        if importance >= 0:
+            node.importance = min(1.0, max(0.0, importance))
+            updated_fields.append("importance")
+        if emotional_valence > -2.0:
+            node.emotional_valence = min(1.0, max(-1.0, emotional_valence))
+            updated_fields.append("emotional_valence")
+        if emotional_intensity >= 0:
+            node.emotional_intensity = min(1.0, max(0.0, emotional_intensity))
+            updated_fields.append("emotional_intensity")
+        if category:
+            node.category = category
+            updated_fields.append("category")
+        if tags:
+            node.tags = tags
+            updated_fields.append("tags")
+
+        node.last_accessed = datetime.now().isoformat()
+        node.access_count += 1
+        network._save()
+
+        return json.dumps({
+            "status": "updated",
+            "memory_id": memory_id,
+            "updated_fields": updated_fields,
+            "current": {
+                "content": node.content[:60],
+                "importance": round(node.importance, 2),
+                "emotional_valence": round(node.emotional_valence, 2),
+                "emotional_intensity": round(node.emotional_intensity, 2),
+                "category": node.category,
+                "tags": node.tags,
+            },
+        }, ensure_ascii=False)
+
+    # ================================================================
+    #  Tool 5: list_memories — 記憶庫概覽
     # ================================================================
 
     @mcp.tool()
@@ -563,16 +801,27 @@ def create_server():
         建議每天執行一次（SessionStart Hook 會自動檢查）。
         """
         report = network.run_sleep_consolidation()
-        stages_summary = "\n".join(
-            f"  {k}: {v}" for k, v in report["stages"].items()
-        )
-        return json.dumps({
+
+        result = {
             "status": "completed",
             "duration": report.get("finished_at", ""),
             "nodes": f"{report['nodes_before']} → {report['nodes_after']}",
             "connections": f"{report['connections_before']} → {report['connections_after']}",
             "stages": report["stages"],
-        }, ensure_ascii=False)
+        }
+
+        # 如果有 cluster 使用了 fallback 摘要（無 API key），
+        # 回傳原始內容讓 Claude 自己精煉
+        pending = report.get("pending_refinement", [])
+        if pending:
+            result["pending_refinement"] = pending
+            result["refinement_hint"] = (
+                "以上模式使用了簡易摘要。請用 save_memory 為每個 pending cluster "
+                "提供更精確的 semantic 歸納（category='semantic', importance=0.7+），"
+                "然後用 forget_memory 刪除舊的 semantic_id。"
+            )
+
+        return json.dumps(result, ensure_ascii=False)
 
     # ================================================================
     #  Tool 6: sleep_status — 查看鞏固狀態

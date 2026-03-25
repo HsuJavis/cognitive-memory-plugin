@@ -20,9 +20,11 @@ UserPromptSubmit Hook — 情境觸發記憶提取 + System 1 快速判斷
 import sys
 import json
 import os
+from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcp_server import MemoryNetwork
+from mcp_server import MemoryNetwork, _get_cwd_from_event
 
 def emotional_scan(text: str) -> dict:
     """
@@ -68,7 +70,20 @@ def main():
     if not content:
         sys.exit(0)
 
-    network = MemoryNetwork()
+    # ---- 累積使用者訊息（供 Stop hook 自動提取用）----
+    session_id = event_data.get("session_id", "default")
+    cwd = _get_cwd_from_event(event_data)
+    network = MemoryNetwork(project_dir=cwd)
+
+    transcript_file = network._dir / f"session_{session_id}_transcript.jsonl"
+    try:
+        with open(transcript_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "content": content,
+                "ts": datetime.now().isoformat(),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
     if network.count == 0:
         sys.exit(0)
 
@@ -91,6 +106,22 @@ def main():
 
     if not activated:
         sys.exit(0)
+
+    # ---- 2.5 情緒回饋: 將當前情緒上下文寫回被激活的記憶 ----
+    # 模擬杏仁核對海馬迴的調節：情緒激動時，記憶編碼更深
+    if emotions["intensity"] > 0.3:
+        for node, act in activated:
+            # 用指數移動平均更新，避免單次情緒覆蓋歷史
+            alpha = 0.3  # 新情緒的權重
+            node.emotional_intensity = min(
+                1.0,
+                node.emotional_intensity * (1 - alpha) + emotions["intensity"] * alpha,
+            )
+            # valence 也做平滑更新
+            node.emotional_valence = max(-1.0, min(1.0,
+                node.emotional_valence * (1 - alpha) + emotions["valence"] * alpha,
+            ))
+        network._save()
 
     # 過濾掉 SessionStart 已經載入的高重要度記憶（避免重複）
     contextual = [(n, a) for n, a in activated if n.importance < 0.7]
