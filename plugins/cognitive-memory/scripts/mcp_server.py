@@ -115,8 +115,12 @@ class MemoryNetwork:
                 os.environ.get("COGNITIVE_MEMORY_DIR")
                 or os.path.expanduser("~/.cognitive-memory")
             )
-            # 專案隔離: 從 project_dir 或 cwd 推導子目錄
-            proj = project_dir or os.getcwd()
+            # 專案隔離: 優先順序 project_dir > CLAUDE_PROJECT_DIR > cwd
+            proj = (
+                project_dir
+                or os.environ.get("CLAUDE_PROJECT_DIR")
+                or os.getcwd()
+            )
             self._dir = base / _path_to_subdir(proj)
 
         self._dir.mkdir(parents=True, exist_ok=True)
