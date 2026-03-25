@@ -288,7 +288,7 @@ def main():
     log(f"messages found: {len(messages)}")
 
     if messages:
-
+        try:
             log(f"transcript has {len(messages)} messages")
 
             # ---- 1a. 規則式提取（身份、偏好等結構化資訊）----
@@ -321,20 +321,15 @@ def main():
                         network.connect(saved.id, sid, weight=0.3)
 
             # ---- 1b. Episodic 記錄（規則未匹配的有意義訊息）----
-            # 收集所有已存記憶的內容，用於子字串去重（解決中文無空格分詞問題）
             existing_contents = [n.content for n in network._nodes.values()]
 
             for msg in messages:
                 msg_stripped = msg.strip()
-                # 跳過: 太短、常見語氣詞
                 if len(msg_stripped) < 5 or msg_stripped.lower() in SKIP_MESSAGES:
                     continue
 
-                # 跳過: 訊息的關鍵片段已在已存記憶中（中文子字串匹配）
-                # 例如「我有一個冰淇淋店」→ 檢查「冰淇淋店」是否已在某條記憶中
                 is_covered = False
                 for ec in existing_contents:
-                    # 取訊息中 ≥3 字元的連續片段比對（中文 3 字即具語意）
                     for i in range(len(msg_stripped) - 2):
                         chunk = msg_stripped[i:i+3]
                         if chunk in ec:
@@ -350,7 +345,7 @@ def main():
                     id="",
                     content=msg_stripped,
                     category="episodic",
-                    importance=0.3,   # 低重要度，靠鞏固決定去留
+                    importance=0.3,
                     emotional_intensity=0.1,
                     tags=["conversation"],
                     source="auto-episodic",
