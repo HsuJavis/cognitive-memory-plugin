@@ -381,7 +381,7 @@ def create_server():
     # 建立 MCP Server
     mcp = FastMCP(
         "cognitive-memory",
-        description="認知記憶系統 — 擴散激活、睡眠鞏固、情緒標記",
+        instructions="認知記憶系統 — 擴散激活、睡眠鞏固、情緒標記",
     )
 
     # ================================================================
