@@ -60,10 +60,13 @@ def main():
         sys.exit(0)
 
     # 提取使用者的 prompt 文字
-    message = event_data.get("message", {})
-    content = message.get("content", "")
+    # Claude Code UserPromptSubmit 用 "user_prompt" 欄位
+    # 也相容舊格式 "message.content"
+    content = event_data.get("user_prompt", "")
+    if not content:
+        message = event_data.get("message", {})
+        content = message.get("content", "") if isinstance(message, dict) else ""
     if isinstance(content, list):
-        # 可能是 multi-part content
         content = " ".join(
             part.get("text", "") for part in content if isinstance(part, dict)
         )
