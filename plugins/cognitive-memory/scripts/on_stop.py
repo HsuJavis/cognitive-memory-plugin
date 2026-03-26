@@ -482,12 +482,69 @@ def main():
 
         session_file.unlink(missing_ok=True)
 
-    # Stop event 清理 offset（session 結束了，下次是新 session）
-    # PreCompact 不清理（同 session 會繼續）
-    if hook_event == "Stop":
-        offset_file.unlink(missing_ok=True)
+    # ---- PreCompact 專屬: 鞏固 + 清理 + 注入重要記憶 ----
+    if hook_event == "PreCompact":
+        # 5a. 執行 sleep consolidation（episodic 聚類 → semantic）
+        report = network.run_sleep_consolidation()
+        consolidated = report["stages"].get("3_extract", "")
+        pruned_count = 0
 
-    network._save()
+        # 5b. 清除已鞏固的低價值 episodic（importance < 0.3 且已標記 consolidated）
+        to_remove = []
+        for nid, node in network._nodes.items():
+            if (node.category == "episodic"
+                    and "consolidated" in node.tags
+                    and node.importance < 0.3):
+                to_remove.append(nid)
+        for nid in to_remove:
+            # 清理連結
+            for other in network._nodes.values():
+                other.connections.pop(nid, None)
+            del network._nodes[nid]
+            pruned_count += 1
+
+        log(f"[PreCompact] consolidation: {consolidated}, pruned {pruned_count} old episodics")
+
+        # 5c. 引導 compactor 產生更精簡的摘要
+        high = sorted(
+            [n for n in network._nodes.values() if n.importance >= 0.5],
+            key=lambda n: n.importance, reverse=True,
+        )[:10]
+
+        lines = [
+            "[認知記憶系統 — Compact 指引]",
+            "以下資訊已持久化到記憶網路，compact 摘要中不需要重複這些細節，",
+            "只需保留：(1) 當前未完成的任務狀態 (2) 使用者最近的意圖和指令。",
+            "",
+        ]
+        if high:
+            lines.append("已持久化的記憶：")
+            for n in high:
+                lines.append(f"- [{n.category}] {n.content}")
+            lines.append("")
+
+        lines.append(
+            "對話中的技術細節、除錯過程、中間嘗試等已記錄到記憶網路，"
+            "compact 摘要可以省略這些內容。需要時用 recall_memory 查詢即可。"
+        )
+
+        pending = report.get("pending_refinement", [])
+        if pending:
+            lines.append("")
+            lines.append("[待辦] compact 後請用 Agent(model:haiku) + update_memory 精煉以下摘要：")
+            for p in pending:
+                lines.append(f"- semantic_id={p['semantic_id']}, topic={p['topic']}")
+
+        output = {"additionalContext": "\n".join(lines)}
+        print(json.dumps(output, ensure_ascii=False))
+
+        network._save()
+        log(f"[PreCompact] done. nodes={len(network._nodes)}")
+    else:
+        # Stop / SubagentStop: 清理 offset（session 結束了）
+        offset_file.unlink(missing_ok=True)
+        network._save()
+
     sys.exit(0)
 
 if __name__ == "__main__":

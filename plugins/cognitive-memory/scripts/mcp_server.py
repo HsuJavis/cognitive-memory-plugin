@@ -10,7 +10,7 @@ MCP 傳輸: stdio（標準輸入/輸出）
 所有記憶網路邏輯和睡眠鞏固邏輯都包含在內。
 
 安裝依賴:
-  pip install mcp anthropic
+  pip install mcp
 
 啟動（通常由 Claude Code 透過 .mcp.json 自動啟動）:
   python3 mcp_server.py
@@ -271,7 +271,7 @@ class MemoryNetwork:
             json.dumps({"last_sleep": datetime.now().isoformat()}), encoding="utf-8"
         )
 
-    def run_sleep_consolidation(self, llm_summarize_fn=None) -> dict:
+    def run_sleep_consolidation(self) -> dict:
         """
         完整的睡眠鞏固循環
 
@@ -361,17 +361,9 @@ class MemoryNetwork:
             all_tags = [t for n in cluster for t in n.tags]
             common = [t for t in set(all_tags) if all_tags.count(t) >= 2] or ["general"]
 
-            contents = [f"- {n.content}" for n in cluster]
-            used_fallback = False
-            summary = None
-            if llm_summarize_fn:
-                summary = llm_summarize_fn(contents, common[0])
-            else:
-                summary = _try_llm_summarize(contents, common[0])
-            if not summary:
-                snippets = [n.content[:30] for n in cluster[:4]]
-                summary = f"關於「{common[0]}」的歸納: {'; '.join(snippets)}"
-                used_fallback = True
+            # 使用簡易摘要，後續由對話中的 Claude 精煉
+            snippets = [n.content[:30] for n in cluster[:4]]
+            summary = f"關於「{common[0]}」的歸納: {'; '.join(snippets)}"
 
             sem = MemoryNode(
                 id="", content=summary, category="semantic",
@@ -388,13 +380,12 @@ class MemoryNetwork:
                     node.tags.append("consolidated")
             extracted += 1
 
-            if used_fallback:
-                pending_clusters.append({
-                    "semantic_id": saved.id,
-                    "topic": common[0],
-                    "contents": [n.content for n in cluster],
-                    "current_summary": summary,
-                })
+            pending_clusters.append({
+                "semantic_id": saved.id,
+                "topic": common[0],
+                "contents": [n.content for n in cluster],
+                "current_summary": summary,
+            })
 
         report["stages"]["3_extract"] = f"提取 {extracted} 個模式"
         if pending_clusters:
@@ -444,72 +435,6 @@ class MemoryNetwork:
     @property
     def count(self) -> int:
         return len(self._nodes)
-
-
-# ============================================================================
-#  LLM 摘要 — 用於睡眠鞏固 Stage 3 的語意歸納
-# ============================================================================
-
-def _find_api_key() -> Optional[str]:
-    """
-    從多個來源自動搜尋 Anthropic API key，使用者不需手動設定。
-
-    搜尋順序:
-    1. ANTHROPIC_API_KEY 環境變數（標準）
-    2. ~/.anthropic/api_key 檔案
-    3. ~/.config/anthropic/api_key 檔案
-    """
-    # 1. 環境變數
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if key:
-        return key
-
-    # 2. 常見檔案位置
-    for path in [
-        Path.home() / ".anthropic" / "api_key",
-        Path.home() / ".config" / "anthropic" / "api_key",
-    ]:
-        try:
-            if path.exists():
-                key = path.read_text(encoding="utf-8").strip()
-                if key and key.startswith("sk-"):
-                    return key
-        except Exception:
-            pass
-
-    return None
-
-
-def _try_llm_summarize(contents: list[str], topic: str) -> Optional[str]:
-    """
-    嘗試用 Anthropic API 將多條 episodic 記憶歸納為一條 semantic 記憶。
-    自動搜尋 API key，找不到或呼叫失敗則返回 None。
-    """
-    api_key = _find_api_key()
-    if not api_key:
-        logger.info("未找到 API key，Stage 3 將使用 fallback 摘要")
-        return None
-
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"將以下關於「{topic}」的多條記憶歸納為一句繁體中文摘要，"
-                    f"只輸出摘要本身，不要前綴或解釋：\n"
-                    + "\n".join(contents)
-                ),
-            }],
-        )
-        text = response.content[0].text.strip()
-        return text if text else None
-    except Exception as e:
-        logger.warning(f"LLM 摘要失敗，使用 fallback: {e}")
-        return None
 
 
 # ============================================================================
@@ -835,15 +760,14 @@ def create_server(project_dir: Optional[str] = None):
             "stages": report["stages"],
         }
 
-        # 如果有 cluster 使用了 fallback 摘要（無 API key），
-        # 回傳原始內容讓 Claude 自己精煉
+        # 回傳待精煉的 cluster，讓對話中的 Claude 自己歸納摘要
         pending = report.get("pending_refinement", [])
         if pending:
             result["pending_refinement"] = pending
             result["refinement_hint"] = (
-                "以上模式使用了簡易摘要。請用 save_memory 為每個 pending cluster "
-                "提供更精確的 semantic 歸納（category='semantic', importance=0.7+），"
-                "然後用 forget_memory 刪除舊的 semantic_id。"
+                "以上模式使用了簡易拼接摘要。請閱讀每個 cluster 的 contents，"
+                "歸納出一句精確的繁體中文摘要，然後用 update_memory 更新對應的 "
+                "semantic_id 的 content 欄位。"
             )
 
         return json.dumps(result, ensure_ascii=False)
