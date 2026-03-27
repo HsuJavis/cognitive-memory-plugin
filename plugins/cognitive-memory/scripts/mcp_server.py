@@ -84,9 +84,7 @@ def hook_log(hook_name: str, message: str, log_dir: Optional[Path] = None):
     若未指定 log_dir 則寫到基礎目錄。
     """
     if log_dir is None:
-        log_dir = Path(
-            os.environ.get("COGNITIVE_MEMORY_DIR", os.path.expanduser("~/.cognitive-memory"))
-        )
+        log_dir = Path(os.getcwd()) / ".cognitive-memory"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "hooks.log"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -123,25 +121,17 @@ class MemoryNetwork:
     關聯式記憶網路 — 支援擴散激活的持久記憶儲存
 
     依專案目錄隔離：每個工作目錄有獨立的記憶空間。
-    儲存位置: ~/.cognitive-memory/{project-subdir}/memory_network.json
+    儲存位置: {project-dir}/.cognitive-memory/memory_network.json
     """
 
     def __init__(self, storage_dir: Optional[str] = None, project_dir: Optional[str] = None):
         if storage_dir:
-            # 直接指定完整路徑（測試或明確指定時），不加專案子目錄
+            # 直接指定完整路徑（測試或明確指定時）
             self._dir = Path(storage_dir)
         else:
-            base = Path(
-                os.environ.get("COGNITIVE_MEMORY_DIR")
-                or os.path.expanduser("~/.cognitive-memory")
-            )
-            # 專案隔離: 優先順序 project_dir > CLAUDE_PROJECT_DIR > cwd
-            proj = (
-                project_dir
-                or os.environ.get("CLAUDE_PROJECT_DIR")
-                or os.getcwd()
-            )
-            self._dir = base / _path_to_subdir(proj)
+            # 專案隔離: 記憶存放在專案目錄下的 .cognitive-memory/
+            proj = project_dir or os.getcwd()
+            self._dir = Path(proj) / ".cognitive-memory"
 
         self._dir.mkdir(parents=True, exist_ok=True)
         self._file = self._dir / "memory_network.json"
@@ -808,12 +798,7 @@ def create_server(project_dir: Optional[str] = None):
 # ============================================================================
 
 if __name__ == "__main__":
-    # 從 args 讀取專案目錄（由 .mcp.json 傳入 ${CLAUDE_PROJECT_DIR}）
-    _project_dir = None
-    if len(sys.argv) > 1:
-        _arg = sys.argv[1]
-        # 確保不是未展開的模板變數
-        if _arg and not _arg.startswith("${"):
-            _project_dir = _arg
-    server = create_server(project_dir=_project_dir)
+    # MCP server subprocess 的 cwd 就是 Claude Code 的專案目錄
+    # MemoryNetwork 會自動用 os.getcwd() 作為專案路徑
+    server = create_server()
     server.run(transport="stdio")
